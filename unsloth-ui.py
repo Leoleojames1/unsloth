@@ -30,8 +30,6 @@ Models supported:
 Run with:
 python unsloth-ui.py
 
-    Written by:
-        @sebdg, and modified by @lborcherding
 Happy fine-tuning! 🦥
 """
 import gradio as gr
@@ -141,8 +139,13 @@ def formatting_prompts_func(examples, template_style):
     if template_style == "chatml":
         # Handle ShareGPT/ChatML format
         messages = examples["conversations"]
-        texts = [tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=False) 
-                for message in messages]
+        texts = []
+        for message in messages:
+            if 'value' in message:
+                texts.append(tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=False))
+            else:
+                # Handle the case where 'value' key is missing
+                texts.append("Missing 'value' key in message")
         return {"text": texts}
     
     elif template_style == "alpaca":
@@ -248,10 +251,12 @@ def load_data(dataset_name, template_style, progress=gr.Progress()):
             ])
         elif template_style in ["chatml", "jsonl"]:
             messages = dataset[i]['conversations']
-            preview_data.append([
-                messages[0]['value'],
-                messages[1]['value'] if len(messages) > 1 else ""
-            ])
+            if len(messages) > 0 and "value" in messages[0]:
+                first_val = messages[0]["value"]
+                second_val = messages[1]["value"] if len(messages) > 1 and "value" in messages[1] else ""
+            else:
+                first_val, second_val = "", ""
+            preview_data.append([first_val, second_val])
     
     progress(1.0, desc="Dataset loaded")
     return (
