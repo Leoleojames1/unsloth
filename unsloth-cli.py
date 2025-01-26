@@ -20,7 +20,7 @@ Usage: (most of the options have valid default values this is an extended exampl
     --random_state 3407 --use_rslora --per_device_train_batch_size 4 --gradient_accumulation_steps 8 \
     --warmup_steps 5 --max_steps 400 --learning_rate 2e-6 --logging_steps 1 --optim "adamw_8bit" \
     --weight_decay 0.005 --lr_scheduler_type "linear" --seed 3407 --output_dir "outputs" \
-    --report_to "tensorboard" --save_model --save_path "model" --quantization_method "f16" \
+    --report_to "tensorboard" --save_model --save_path "model" --quantization "f16" \
     --push_model --hub_path "hf/model" --hub_token "your_hf_token"
 
 To see a full list of configurable options, use:
@@ -31,17 +31,39 @@ Happy fine-tuning!
 
 import argparse
 import os
+import torch
+from unsloth import FastLanguageModel
+from datasets import load_dataset
+from transformers.utils import strtobool
+from trl import SFTTrainer
+from transformers import TrainingArguments
+from unsloth import is_bfloat16_supported
+from unsloth.chat_templates import get_chat_template, standardize_sharegpt, train_on_responses_only
+import logging
 
+def get_model_template(model_name):
+    name = model_name.lower()
+    templates = {
+        "llama-3": "llama-3",
+        "llama-31": "llama-3.1", 
+        "llama-3.1": "llama-3.1",
+        "mistral": "mistral", 
+        "gemma": "gemma",
+        "phi-3": "phi-3",
+        "phi-4": "phi-4",
+        "qwen-2.5": "qwen-2.5",
+        "chatml": "chatml",
+        "vicuna": "vicuna", 
+        "alpaca": "alpaca",
+        "zephyr": "zephyr"
+    }
+    
+    for key, template in templates.items():
+        if key in name:
+            return template
+    return "llama-3.1"
 
 def run(args):
-    import torch
-    from unsloth import FastLanguageModel
-    from datasets import load_dataset
-    from transformers.utils import strtobool
-    from trl import SFTTrainer
-    from transformers import TrainingArguments
-    from unsloth import is_bfloat16_supported
-    import logging
     logging.getLogger('hf-to-gguf').setLevel(logging.WARNING)
 
     # Load model and tokenizer
@@ -51,7 +73,8 @@ def run(args):
         dtype=args.dtype,
         load_in_4bit=args.load_in_4bit,
     )
-
+    template = get_model_template(args.model_name)
+    tokenizer = get_chat_template(tokenizer, chat_template=template)
     # Configure PEFT model
     model = FastLanguageModel.get_peft_model(
         model,
@@ -67,35 +90,37 @@ def run(args):
         loftq_config=args.loftq_config,
     )
 
-    alpaca_prompt = """Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+    def formatting_prompts_func(examples):
+        if args.data_format == "chatml":
+            # Handle ShareGPT/ChatML format
+            messages = examples["conversations"]
+            texts = [tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=False) 
+                    for message in messages]
+        elif args.data_format == "alpaca":
+            # Handle Alpaca 3-column format
+            texts = []
+            for instruction, input, output in zip(examples["instruction"], examples["input"], examples["output"]):
+                text = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
     ### Instruction:
-    {}
+    {instruction}{tokenizer.eos_token}
 
     ### Input:
-    {}
+    {input}{tokenizer.eos_token}
 
     ### Response:
-    {}"""
-
-    EOS_TOKEN = tokenizer.eos_token  # Must add EOS_TOKEN
-    def formatting_prompts_func(examples):
-        instructions = examples["instruction"]
-        inputs       = examples["input"]
-        outputs      = examples["output"]
-        texts = []
-        for instruction, input, output in zip(instructions, inputs, outputs):
-            text = alpaca_prompt.format(instruction, input, output) + EOS_TOKEN
-            texts.append(text)
+    {output}{tokenizer.eos_token}"""
+                texts.append(text)
+        elif args.data_format == "jsonl":
+            messages = examples["messages"]
+            texts = [tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=False) 
+                    for message in messages]
+                    
         return {"text": texts}
 
-    use_modelscope = strtobool(os.environ.get('UNSLOTH_USE_MODELSCOPE', 'False'))
-    if use_modelscope:
-        from modelscope import MsDataset
-        dataset = MsDataset.load(args.dataset, split="train")
-    else:
-        # Load and format dataset
-        dataset = load_dataset(args.dataset, split="train")
+    dataset = load_dataset(args.dataset, split="train")
+    if args.data_format == "chatml":
+        dataset = standardize_sharegpt(dataset)
     dataset = dataset.map(formatting_prompts_func, batched=True)
     print("Data is formatted and ready!")
 
@@ -129,35 +154,42 @@ def run(args):
         args=training_args,
     )
 
+    if "llama" in args.model_name.lower():
+        trainer = train_on_responses_only(
+            trainer,
+            instruction_part="<|start_header_id|>user<|end_header_id|>\n\n",
+            response_part="<|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+        
     # Train model
     trainer_stats = trainer.train()
-
+   
     # Save model
     if args.save_model:
-        # if args.quantization_method is a list, we will save the model for each quantization method
+        # if args.quantization is a list, we will save the model for each quantization method
         if args.save_gguf:
             if isinstance(args.quantization, list):
-                for quantization_method in args.quantization:
-                    print(f"Saving model with quantization method: {quantization_method}")
+                for quantization in args.quantization:
+                    print(f"Saving model with quantization method: {quantization}")
                     model.save_pretrained_gguf(
                         args.save_path,
                         tokenizer,
-                        quantization_method=quantization_method,
+                        quantization=quantization,
                     )
                     if args.push_model:
                         model.push_to_hub_gguf(
                             hub_path=args.hub_path,
                             hub_token=args.hub_token,
-                            quantization_method=quantization_method,
+                            quantization=quantization,
                         )
             else:
                 print(f"Saving model with quantization method: {args.quantization}")
-                model.save_pretrained_gguf(args.save_path, tokenizer, quantization_method=args.quantization)
+                model.save_pretrained_gguf(args.save_path, tokenizer, quantization=args.quantization)
                 if args.push_model:
                     model.push_to_hub_gguf(
                         hub_path=args.hub_path,
                         hub_token=args.hub_token,
-                        quantization_method=quantization_method,
+                        quantization=quantization,
                     )
         else:
             model.save_pretrained_merged(args.save_path, tokenizer, args.save_method)
@@ -166,7 +198,6 @@ def run(args):
     else:
         print("Warning: The model is not saved!")
 
-
 if __name__ == "__main__":
 
     # Define argument parser
@@ -174,6 +205,10 @@ if __name__ == "__main__":
 
     model_group = parser.add_argument_group("🤖 Model Options")
     model_group.add_argument('--model_name', type=str, default="unsloth/llama-3-8b", help="Model name to load")
+    model_group.add_argument('--data_format', type=str, default="alpaca", 
+    choices=["alpaca", "chatml", "jsonl", "llama-3", "llama-3.1", "mistral", 
+            "gemma", "phi-3", "phi-4", "qwen-2.5", "vicuna", "zephyr"],
+    help="Data format for training")
     model_group.add_argument('--max_seq_length', type=int, default=2048, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action='store_true', help="Use 4bit quantization to reduce memory usage")
@@ -189,7 +224,6 @@ if __name__ == "__main__":
     lora_group.add_argument('--use_rslora', action='store_true', help="Use rank stabilized LoRA")
     lora_group.add_argument('--loftq_config', type=str, default=None, help="Configuration for LoftQ")
 
-   
     training_group = parser.add_argument_group("🎓 Training Options")
     training_group.add_argument('--per_device_train_batch_size', type=int, default=2, help="Batch size per device during training, default is 2.")
     training_group.add_argument('--gradient_accumulation_steps', type=int, default=4, help="Number of gradient accumulation steps, default is 4.")
@@ -201,7 +235,6 @@ if __name__ == "__main__":
     training_group.add_argument('--lr_scheduler_type', type=str, default="linear", help="Learning rate scheduler type, default is 'linear'.")
     training_group.add_argument('--seed', type=int, default=3407, help="Seed for reproducibility, default is 3407.")
     
-
     # Report/Logging arguments
     report_group = parser.add_argument_group("📊 Report Options")
     report_group.add_argument('--report_to', type=str, default="tensorboard",
@@ -218,12 +251,20 @@ if __name__ == "__main__":
     save_group.add_argument('--save_path', type=str, default="model", help="Path to save the model")
     save_group.add_argument('--quantization', type=str, default="q8_0", nargs="+",
         help="Quantization method for saving the model. common values ('f16', 'q4_k_m', 'q8_0'), Check our wiki for all quantization methods https://github.com/unslothai/unsloth/wiki#saving-to-gguf ")
+    save_group.add_argument('--custom_gguf', type=str, help="Custom GGUF quantization (e.g. Q5_K)")
 
     push_group = parser.add_argument_group('🚀 Push Model Options')
     push_group.add_argument('--push_model', action='store_true', help="Push the model to Hugging Face hub after training")
     push_group.add_argument('--push_gguf', action='store_true', help="Push the model as GGUF to Hugging Face hub after training")
+    push_group.add_argument('--push_lora', action='store_true', help="Push LoRA adapter only")
+    push_group.add_argument('--push_merged', action='store_true', help="Push merged model")
     push_group.add_argument('--hub_path', type=str, default="hf/model", help="Path on Hugging Face hub to push the model")
     push_group.add_argument('--hub_token', type=str, help="Token for pushing the model to Hugging Face hub")
+
+    # ollama_group = parser.add_argument_group('🦙 Ollama Options')
+    # ollama_group.add_argument('--ollama_local', action='store_true', help="Create in Ollama locally")
+    # ollama_group.add_argument('--ollama_push', action='store_true', help="Push to Ollama")
+    # ollama_group.add_argument('--ollama_name', type=str, help="Ollama model name")
 
     args = parser.parse_args()
     run(args)
