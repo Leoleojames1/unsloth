@@ -1,3 +1,39 @@
+#!/usr/bin/env python3
+
+"""
+🦥 Unsloth Fine-Tuning UI
+
+An interactive interface for fine-tuning models using Unsloth with Gradio.
+
+Features:
+- Model loading and configuration with common parameters
+- Dataset preparation with multiple formats (alpaca, chatml, jsonl)
+- LoRA fine-tuning with configurable hyperparameters
+- Model saving in various formats (merged 16/4bit, LoRA adapter)
+- GGUF quantization (16/8/4bit, custom)
+- Hugging Face Hub integration
+- Inference testing
+
+Dataset formats supported:
+- Alpaca (instruction/input/output columns)
+- ChatML/ShareGPT (conversations)
+- JSONL (messages)
+
+Models supported:
+- Llama 3/3.1/3.2
+- Mistral/Mixtral
+- Phi-3/4
+- Gemma 2B/7B
+- Qwen2
+- Yi
+
+Run with:
+python unsloth-ui.py
+
+    Written by:
+        @sebdg, and modified by @lborcherding
+Happy fine-tuning! 🦥
+"""
 import gradio as gr
 from huggingface_hub import HfApi
 from unsloth import FastLanguageModel, is_bfloat16_supported
