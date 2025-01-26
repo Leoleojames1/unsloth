@@ -5,7 +5,7 @@
 
 This script is designed as a starting point for fine-tuning your models using unsloth.
 It includes configurable options for model loading, PEFT parameters, training arguments, 
-and model saving/pushing functionalities.
+and model saving/pushing functionalities
 
 You will likely want to customize this script to suit your specific use case 
 and requirements.
