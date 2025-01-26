@@ -3,7 +3,7 @@
 """
 🦥 Unsloth Fine-Tuning UI
 
-An interactive interface for fine-tuning models using Unsloth with Gradio
+An interactive interface for fine-tuning models using Unsloth with Gradio.
 
 Features:
 - Model loading and configuration with common parameters
